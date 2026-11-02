@@ -95,7 +95,7 @@ class OverlayService : Service() {
     private var dpi = 0
 
     private var bubble: TextView? = null
-    private var box: TextView? = null
+    private var box: OutlineTextView? = null
     private lateinit var bubbleLp: WindowManager.LayoutParams
     private lateinit var boxLp: WindowManager.LayoutParams
 
@@ -267,8 +267,7 @@ class OverlayService : Service() {
         }
         // ให้กล่องคำแปลกว้างพอดีกับจอใหม่ และดึงปุ่มกลับเข้าจอ
         box?.let {
-            boxLp.width = (w * 0.9).toInt()
-            boxLp.x = (w * 0.05).toInt()
+            it.maxWidthPx = (w * 0.9).toInt()
             safeUpdate(it, boxLp)
         }
         bubble?.let {
@@ -416,25 +415,18 @@ class OverlayService : Service() {
             y = capH / 3
         }
 
-        val t = TextView(this).apply {
-            setTextColor(Color.WHITE)
-            textSize = 18f
-            setLineSpacing(0f, 1.15f)
-            gravity = Gravity.CENTER
-            setPadding(dp(14), dp(10), dp(14), dp(10))
-            background = GradientDrawable().apply {
-                setColor(0xD9000000.toInt())
-                cornerRadius = dp(12).toFloat()
-            }
+        // ตัวอักษรขาวขอบดำ ไม่มีพื้นหลัง กว้างเท่าข้อความ อยู่กลางจอ
+        val t = OutlineTextView(this).apply {
+            maxWidthPx = (capW * 0.9).toInt()
             visibility = View.GONE
         }
         boxLp = WindowManager.LayoutParams(
-            (capW * 0.9).toInt(), WindowManager.LayoutParams.WRAP_CONTENT, overlayType(),
+            WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT, overlayType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
         ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = (capW * 0.05).toInt()
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            x = 0 // ระยะเลื่อนจากกึ่งกลางจอ (ลากเพื่อย้ายได้)
             y = dp(40)
         }
 
