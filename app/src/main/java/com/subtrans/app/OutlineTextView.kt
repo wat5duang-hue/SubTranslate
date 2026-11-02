@@ -14,25 +14,25 @@ import kotlin.math.ceil
 import kotlin.math.min
 
 /**
- * ข้อความสีขาวขอบดำแบบซับไตเติล ไม่มีพื้นหลัง
- * วาดตัวอักษร 2 รอบ: รอบแรกเป็นเส้นขอบสีดำหนา รอบสองเป็นตัวอักษรสีขาวทับ
+ * ข้อความแบบซับไตเติล (ตัวอักษรสี + ขอบดำ) ไม่มีพื้นหลัง
+ * วาด 2 รอบ: รอบแรกเป็นเส้นขอบสีดำ รอบสองเป็นตัวอักษรทับ
  */
 class OutlineTextView(context: Context) : View(context) {
 
-    private fun dp(v: Float): Float =
-        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, resources.displayMetrics)
-
     private val paint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
         typeface = Typeface.DEFAULT_BOLD
-        textSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 20f, resources.displayMetrics)
         strokeJoin = Paint.Join.ROUND
         strokeCap = Paint.Cap.ROUND
     }
-
-    /** ความหนาเส้นขอบ (ครึ่งหนึ่งจะยื่นออกนอกตัวอักษร) */
-    private val strokePx = dp(4f)
-    private val pad = ceil(strokePx).toInt()
+    private var strokePx = 0f
+    private var pad = 0
     private var layout: StaticLayout? = null
+
+    var textColor: Int = Color.WHITE
+        set(value) {
+            field = value
+            invalidate()
+        }
 
     var text: String = ""
         set(value) {
@@ -47,6 +47,20 @@ class OutlineTextView(context: Context) : View(context) {
             field = value
             requestLayout()
         }
+
+    init {
+        setStyle(20, 4)
+    }
+
+    /** ตั้งขนาดตัวอักษร (sp) และความหนาขอบ (dp) */
+    fun setStyle(textSizeSp: Int, strokeDp: Int) {
+        val dm = resources.displayMetrics
+        paint.textSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, textSizeSp.toFloat(), dm)
+        strokePx = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, strokeDp.toFloat(), dm)
+        pad = ceil(strokePx).toInt() + 2
+        requestLayout()
+        invalidate()
+    }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val mode = MeasureSpec.getMode(widthMeasureSpec)
@@ -69,14 +83,14 @@ class OutlineTextView(context: Context) : View(context) {
         val l = layout ?: return
         canvas.save()
         canvas.translate(pad.toFloat(), pad.toFloat())
-        // ขอบดำ
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = strokePx
-        paint.color = Color.BLACK
-        l.draw(canvas)
-        // ตัวอักษรขาว
+        if (strokePx > 0f) {
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = strokePx
+            paint.color = Color.BLACK
+            l.draw(canvas)
+        }
         paint.style = Paint.Style.FILL
-        paint.color = Color.WHITE
+        paint.color = textColor
         l.draw(canvas)
         canvas.restore()
     }

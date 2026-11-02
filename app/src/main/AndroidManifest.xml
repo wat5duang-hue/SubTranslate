@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- แสดงปุ่มลอยและกล่องคำแปลทับแอปอื่น -->
+    <!-- แสดงปุ่มลอยและคำแปลทับแอปอื่น -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!-- ทำงานเบื้องหลังพร้อมจับภาพหน้าจอ -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- ใช้แค่ตอนดาวน์โหลดโมเดลแปลภาษาครั้งแรก -->
+    <!-- ดาวน์โหลดโมเดลแปลภาษา / แปลด้วย AI -->
     <uses-permission android:name="android.permission.INTERNET" />
 
     <application
@@ -19,16 +19,35 @@
 
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".HistoryActivity"
+            android:exported="false"
+            android:label="ประวัติคำแปล" />
+
         <service
             android:name=".OverlayService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
+
+        <!-- ปุ่มลัดในแผงตั้งค่าด่วน -->
+        <service
+            android:name=".SubTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile"
+            android:label="แปลซับ"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>
