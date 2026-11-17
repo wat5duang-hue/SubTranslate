@@ -54,6 +54,8 @@ import com.google.mlkit.nl.translate.Translator
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognizer
+import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
 import kotlin.math.abs
 import kotlin.math.hypot
 
@@ -71,15 +73,19 @@ class OverlayService : Service() {
         const val EXTRA_CODE = "code"
         const val EXTRA_DATA = "data"
         const val ACTION_STOP = "com.subtrans.app.STOP"
+        const val ACTION_TOGGLE_PAUSE = "com.subtrans.app.TOGGLE_PAUSE"
         private const val CHANNEL_ID = "subtrans"
         private const val NOTIFICATION_ID = 1
-        private const val AUTO_INTERVAL_MS = 600L
         private const val SAME_TEXT_SIMILARITY = 0.8
+        private const val STABLE_SIMILARITY = 0.85
+        private const val MIN_LINE_CONFIDENCE = 0.45f
         private const val FRAME_DIFF_THRESHOLD = 4.0
         private const val BUBBLE_FADE_MS = 3000L
+        private const val BUSY_TIMEOUT_MS = 10_000L
         private const val COLOR_IDLE = 0xFF1E88E5.toInt()
         private const val COLOR_AUTO = 0xFF43A047.toInt()
         private const val COLOR_BUSY = 0xFFFB8C00.toInt()
+        private const val COLOR_PAUSED = 0xFF757575.toInt()
 
         @Volatile
         var running = false
@@ -118,20 +124,25 @@ class OverlayService : Service() {
     private var mlTranslator: Translator? = null
     private var gemini: GeminiTranslator? = null
     private val cache = TranslationCache()
-    private val recentLines = ArrayDeque<String>()
+    private val recentPairs = ArrayDeque<Pair<String, String>>()
+    private var pendingText: String? = null
+    private var pendingBounds: Rect? = null
     private var lastAiErrorToast = 0L
 
     private var busy = false
+    private var busySince = 0L
     private var auto = false
+    private var paused = false
     private var autoBeforePicker = false
     private var lastText = ""
     private var emptyCount = 0
+    private var rowScratch = ByteArray(0)
 
     private val autoTick = object : Runnable {
         override fun run() {
             if (!auto) return
-            captureAndTranslate(fromAuto = true)
-            main.postDelayed(this, AUTO_INTERVAL_MS)
+            if (!paused) captureAndTranslate(fromAuto = true)
+            main.postDelayed(this, prefs.scanIntervalMs)
         }
     }
 
@@ -140,8 +151,12 @@ class OverlayService : Service() {
     private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         when (key) {
             Prefs.KEY_SOURCE_LANG -> setupLanguage()
-            Prefs.KEY_AI_ON, Prefs.KEY_AI_KEY, Prefs.KEY_AI_MODEL -> setupAi()
-            Prefs.KEY_TEXT_SIZE, Prefs.KEY_STROKE, Prefs.KEY_COLOR -> applyBoxStyle()
+            Prefs.KEY_AI_ON, Prefs.KEY_AI_KEY, Prefs.KEY_AI_KEY_ENC, Prefs.KEY_AI_MODEL -> setupAi()
+            Prefs.KEY_TEXT_SIZE, Prefs.KEY_STROKE, Prefs.KEY_COLOR, Prefs.KEY_BG_ALPHA -> applyBoxStyle()
+            in Prefs.STYLE_KEYS -> {
+                cache.clear()
+                lastText = ""
+            }
             Prefs.KEY_POSITION -> resetBoxPosition()
         }
     }
@@ -157,6 +172,10 @@ class OverlayService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             stopSelf()
+            return START_NOT_STICKY
+        }
+        if (intent?.action == ACTION_TOGGLE_PAUSE) {
+            togglePause()
             return START_NOT_STICKY
         }
         if (projection != null) return START_NOT_STICKY
@@ -206,14 +225,15 @@ class OverlayService : Service() {
 
     // ---------------- Notification / foreground ----------------
 
-    private fun startAsForeground() {
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(
-            NotificationChannel(CHANNEL_ID, "แปลซับสด", NotificationManager.IMPORTANCE_LOW)
-        )
+    private fun buildNotification(): android.app.Notification {
         val stopPi = PendingIntent.getService(
             this, 1,
             Intent(this, OverlayService::class.java).setAction(ACTION_STOP),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val pausePi = PendingIntent.getService(
+            this, 3,
+            Intent(this, OverlayService::class.java).setAction(ACTION_TOGGLE_PAUSE),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
         val openPi = PendingIntent.getActivity(
@@ -221,14 +241,25 @@ class OverlayService : Service() {
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE
         )
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+        val statusText = if (paused) "พักชั่วคราว • กด \"ทำต่อ\" เพื่อกลับมาแปล"
+        else "แตะปุ่มลอยเพื่อแปล • กดค้างเพื่อเปิดเมนู"
+        return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_view)
-            .setContentTitle("แปลซับกำลังทำงาน")
-            .setContentText("แตะปุ่มลอยเพื่อแปล • กดค้างเพื่อเปิดเมนู")
+            .setContentTitle(if (paused) "แปลซับพักอยู่" else "แปลซับกำลังทำงาน")
+            .setContentText(statusText)
             .setContentIntent(openPi)
+            .addAction(0, if (paused) "ทำต่อ" else "พักชั่วคราว", pausePi)
             .addAction(0, "หยุด", stopPi)
             .setOngoing(true)
             .build()
+    }
+
+    private fun startAsForeground() {
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.createNotificationChannel(
+            NotificationChannel(CHANNEL_ID, "แปลซับสด", NotificationManager.IMPORTANCE_LOW)
+        )
+        val notification = buildNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
         } else {
@@ -247,7 +278,8 @@ class OverlayService : Service() {
             it.downloadModelIfNeeded(DownloadConditions.Builder().build())
         }
         cache.clear()
-        recentLines.clear()
+        recentPairs.clear()
+        pendingText = null
         lastText = ""
     }
 
@@ -261,6 +293,10 @@ class OverlayService : Service() {
     // ---------------- Screen capture ----------------
 
     private fun screenSize(): Pair<Int, Int> {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val b = wm.currentWindowMetrics.bounds
+            return b.width() to b.height()
+        }
         val display = getSystemService(DisplayManager::class.java).getDisplay(Display.DEFAULT_DISPLAY)
         val m = DisplayMetrics()
         @Suppress("DEPRECATION")
@@ -331,7 +367,9 @@ class OverlayService : Service() {
             resetBoxPosition()
         }
         bubble?.let {
-            bubbleLp.x = if (bubbleLp.x > 0) w - bubbleLp.width else 0
+            val (ox, _) = windowOffset()
+            val wasRight = (bubbleLp.x + ox + bubbleLp.width / 2) >= (capH / 2)
+            bubbleLp.x = if (wasRight) w - bubbleLp.width - ox else -ox
             bubbleLp.y = bubbleLp.y.coerceIn(0, (h - bubbleLp.height).coerceAtLeast(0))
             safeUpdate(it, bubbleLp)
         }
@@ -339,7 +377,7 @@ class OverlayService : Service() {
 
     private class Grab(val bitmap: Bitmap, val left: Int, val top: Int)
 
-    /** ตัดเฉพาะบริเวณซับจากเฟรมล่าสุด และปิดทับปุ่ม/คำแปลของเราเองด้วยสีดำ */
+    /** ตัดเฉพาะบริเวณซับจากเฟรมล่าสุด และปิดทับปุ่ม/คำแปลของเราเองด้วยสีดำ (ลดการสร้าง Bitmap เต็มจอ) */
     private fun grabRegion(masks: List<Rect>, region: RectF): Grab? {
         synchronized(frameLock) {
             val img = latestImage ?: return null
@@ -347,22 +385,48 @@ class OverlayService : Service() {
             val h = img.height
             val plane = img.planes[0]
             val buffer = plane.buffer
-            buffer.rewind()
             val pixelStride = plane.pixelStride
-            val rowPadding = plane.rowStride - pixelStride * w
-            val full = Bitmap.createBitmap(w + rowPadding / pixelStride, h, Bitmap.Config.ARGB_8888)
-            full.copyPixelsFromBuffer(buffer)
-
-            val canvas = Canvas(full)
-            val paint = Paint().apply { color = Color.BLACK }
-            for (m in masks) canvas.drawRect(m, paint)
+            val rowStride = plane.rowStride
 
             val l = (region.left * w).toInt().coerceIn(0, w - 16)
             val t = (region.top * h).toInt().coerceIn(0, h - 16)
             val r = (region.right * w).toInt().coerceIn(l + 16, w)
             val b = (region.bottom * h).toInt().coerceIn(t + 16, h)
-            val crop = Bitmap.createBitmap(full, l, t, r - l, b - t)
-            if (crop !== full) full.recycle()
+            val cw = r - l
+            val ch = b - t
+
+            val crop: Bitmap
+            if (pixelStride == 4) {
+                val needed = cw * 4 * ch
+                if (rowScratch.size < needed) rowScratch = ByteArray(needed)
+                for (row in 0 until ch) {
+                    buffer.position((t + row) * rowStride + l * 4)
+                    buffer.get(rowScratch, row * cw * 4, cw * 4)
+                }
+                crop = Bitmap.createBitmap(cw, ch, Bitmap.Config.ARGB_8888)
+                crop.copyPixelsFromBuffer(ByteBuffer.wrap(rowScratch, 0, needed))
+            } else {
+                buffer.rewind()
+                val rowPadding = rowStride - pixelStride * w
+                val full = Bitmap.createBitmap(w + rowPadding / pixelStride, h, Bitmap.Config.ARGB_8888)
+                full.copyPixelsFromBuffer(buffer)
+                crop = Bitmap.createBitmap(full, l, t, cw, ch)
+                if (crop !== full) full.recycle()
+            }
+
+            if (masks.isNotEmpty()) {
+                val canvas = Canvas(crop)
+                val paint = Paint().apply { color = Color.BLACK }
+                for (m in masks) {
+                    val ml = m.left - l
+                    val mt = m.top - t
+                    val mr = m.right - l
+                    val mb = m.bottom - t
+                    if (mr > 0 && mb > 0 && ml < cw && mt < ch) {
+                        canvas.drawRect(ml.toFloat(), mt.toFloat(), mr.toFloat(), mb.toFloat(), paint)
+                    }
+                }
+            }
             return Grab(crop, l, t)
         }
     }
@@ -390,8 +454,17 @@ class OverlayService : Service() {
     // ---------------- OCR + translate ----------------
 
     private fun captureAndTranslate(fromAuto: Boolean) {
-        if (busy || picker != null) return
+        if (picker != null) return
+        if (busy) {
+            if (SystemClock.elapsedRealtime() - busySince > BUSY_TIMEOUT_MS) {
+                gemini?.cancelPending()
+                busy = false
+            } else {
+                return
+            }
+        }
         busy = true
+        busySince = SystemClock.elapsedRealtime()
         setBubbleColor()
         if (!fromAuto) lastText = ""
 
@@ -404,6 +477,8 @@ class OverlayService : Service() {
             }
         val region = prefs.region(landscape)
         val rec = recognizer
+        val useVision = prefs.aiVision && gemini != null
+        val enhance = prefs.ocrEnhance
 
         bg.post {
             val grab = try {
@@ -418,18 +493,41 @@ class OverlayService : Service() {
                 unchanged = sameFrame(lastSignature, sig)
                 lastSignature = sig
             }
+            if (grab != null && !unchanged && useVision) {
+                val jpeg = ByteArrayOutputStream().use { bos ->
+                    grab.bitmap.compress(Bitmap.CompressFormat.JPEG, 82, bos)
+                    bos.toByteArray()
+                }
+                val bounds = Rect(grab.left, grab.top, grab.left + grab.bitmap.width, grab.top + grab.bitmap.height)
+                grab.bitmap.recycle()
+                main.post { translateWithVision(jpeg, bounds, fromAuto) }
+                return@post
+            }
+            val ocrBmp = if (grab != null && !unchanged && enhance) {
+                Lang.enhanceForOcr(grab.bitmap).also { grab.bitmap.recycle() }
+            } else {
+                grab?.bitmap
+            }
             main.post onMain@{
-                if (grab == null || rec == null) {
+                if (grab == null || ocrBmp == null || rec == null) {
+                    ocrBmp?.recycle()
                     done()
                     if (!fromAuto) toast("ยังไม่ได้ภาพหน้าจอ ลองแตะอีกครั้ง")
                     return@onMain
                 }
                 if (unchanged) {
-                    grab.bitmap.recycle()
-                    done()
+                    ocrBmp.recycle()
+                    // ภาพนิ่งแล้ว = ซับที่รอยืนยันอยู่นิ่งแล้ว → แปลได้เลย
+                    val p = pendingText
+                    if (p != null) {
+                        pendingText = null
+                        translateConfirmed(p, pendingBounds)
+                    } else {
+                        done()
+                    }
                     return@onMain
                 }
-                rec.process(InputImage.fromBitmap(grab.bitmap, 0))
+                rec.process(InputImage.fromBitmap(ocrBmp, 0))
                     .addOnSuccessListener { result ->
                         val (text, bounds) = cleanText(result)
                         bounds?.offset(grab.left, grab.top)
@@ -439,7 +537,44 @@ class OverlayService : Service() {
                         done()
                         if (!fromAuto) toast("อ่านข้อความไม่สำเร็จ")
                     }
-                    .addOnCompleteListener { grab.bitmap.recycle() }
+                    .addOnCompleteListener { ocrBmp.recycle() }
+            }
+        }
+    }
+
+    private fun translateWithVision(jpeg: ByteArray, bounds: Rect, fromAuto: Boolean) {
+        val g = gemini ?: return done()
+        g.translateImage(jpeg, lang, recentPairs.toList(), prefs.aiStyle()) { r ->
+            r.onSuccess { (src, th) ->
+                if (src.isEmpty() || th.isEmpty()) {
+                    done()
+                    if (fromAuto) {
+                        emptyCount++
+                        if (emptyCount >= 4) box?.visibility = View.GONE
+                    } else {
+                        toast("ไม่พบซับในบริเวณที่ตั้งไว้")
+                    }
+                } else {
+                    emptyCount = 0
+                    if (fromAuto && Lang.similarity(src, lastText) >= SAME_TEXT_SIMILARITY) {
+                        done()
+                    } else {
+                        lastText = src
+                        onTranslated(src, th, bounds)
+                    }
+                }
+            }.onFailure { e ->
+                val now = SystemClock.elapsedRealtime()
+                if (now - lastAiErrorToast > 30_000) {
+                    lastAiErrorToast = now
+                    val msg = when ((e as? GeminiTranslator.ApiException)?.code) {
+                        400, 403 -> "API key หรือชื่อรุ่นไม่ถูกต้อง"
+                        429 -> "ใช้ AI เกินโควตา"
+                        else -> "เชื่อมต่อ AI ไม่ได้"
+                    }
+                    toast(msg)
+                }
+                done()
             }
         }
     }
@@ -448,37 +583,62 @@ class OverlayService : Service() {
     private fun cleanText(result: Text): Pair<String, Rect?> {
         val cjk = Lang.isCjk(lang)
         val minLetters = if (cjk) 1 else 2
-        val lines = result.textBlocks
-            .sortedBy { it.boundingBox?.top ?: 0 }
-            .flatMap { it.lines }
+        val all = result.textBlocks.flatMap { it.lines }
+            // ตัดบรรทัดที่ OCR ไม่มั่นใจ (มักเป็นซับที่กำลังจางหาย หรือลายพื้นหลัง)
+            .filter { line -> line.confidence <= 0f || line.confidence >= MIN_LINE_CONFIDENCE }
             .filter { line -> line.text.trim().count { it.isLetter() } >= minLetters }
+        if (all.isEmpty()) return "" to null
+        // ตัวอักษรที่เล็กกว่าซับหลักมาก (โลโก้ เครดิต ข้อความประกอบ) ไม่นับเป็นซับ
+        val maxH = all.maxOf { it.boundingBox?.height() ?: 0 }
+        val lines = all
+            .filter { (it.boundingBox?.height() ?: maxH) >= maxH * 0.55 }
+            .sortedBy { it.boundingBox?.top ?: 0 }
         var bounds: Rect? = null
         for (l in lines) {
             val b = l.boundingBox ?: continue
             if (bounds == null) bounds = Rect(b) else bounds.union(b)
         }
-        val sep = if (lang == "ja" || lang == "zh") "" else " "
-        val text = lines.joinToString(sep) { it.text.trim() }.replace(Regex("\\s+"), " ").trim()
-        return text to bounds
+        val fixed = lines.map { Lang.fixLine(it.text, lang) }.filter { it.isNotBlank() }
+        return Lang.joinLines(fixed, lang) to bounds
     }
 
     private fun handleText(text: String, bounds: Rect?, fromAuto: Boolean) {
         if (text.isEmpty()) {
+            pendingText = null
             done()
             if (fromAuto) {
                 emptyCount++
-                if (emptyCount >= 3) box?.visibility = View.GONE
+                if (emptyCount >= 4) box?.visibility = View.GONE
             } else {
                 toast("ไม่พบซับในบริเวณที่ตั้งไว้")
             }
             return
         }
         emptyCount = 0
+        if (!fromAuto) {
+            pendingText = null
+            translateConfirmed(text, bounds)
+            return
+        }
         // ซับเดิม (OCR อาจอ่านต่างกันนิดหน่อย) → ไม่ต้องแปลใหม่
-        if (fromAuto && Lang.similarity(text, lastText) >= SAME_TEXT_SIMILARITY) {
+        if (Lang.similarity(text, lastText) >= SAME_TEXT_SIMILARITY) {
+            pendingText = null
             done()
             return
         }
+        // ซับใหม่: รอให้อ่านได้ตรงกัน 2 ครั้งติดก่อน กันแปลซับที่กำลังเปลี่ยน/จาง แล้วได้คำผิด
+        val p = pendingText
+        if (p != null && Lang.similarity(text, p) >= STABLE_SIMILARITY) {
+            pendingText = null
+            translateConfirmed(if (text.length >= p.length) text else p, bounds)
+        } else {
+            pendingText = text
+            pendingBounds = bounds
+            done()
+        }
+    }
+
+    private fun translateConfirmed(text: String, bounds: Rect?) {
         lastText = text
 
         cache.get(text)?.let {
@@ -489,7 +649,7 @@ class OverlayService : Service() {
 
         val g = gemini
         if (g != null) {
-            g.translate(text, lang, recentLines.toList()) { r ->
+            g.translate(text, lang, recentPairs.toList(), prefs.aiStyle()) { r ->
                 r.onSuccess { onTranslated(text, it, bounds) }
                     .onFailure { e ->
                         val now = SystemClock.elapsedRealtime()
@@ -510,22 +670,36 @@ class OverlayService : Service() {
         }
     }
 
+    /** แปลออฟไลน์ทีละบรรทัด (บทสนทนาหลายคนแปลแยกกัน ได้ผลดีกว่าแปลรวด) */
     private fun translateOffline(text: String, bounds: Rect?) {
         val t = mlTranslator ?: return done()
-        t.downloadModelIfNeeded(DownloadConditions.Builder().build())
-            .continueWithTask { t.translate(text) }
-            .addOnSuccessListener { onTranslated(text, it, bounds) }
-            .addOnFailureListener {
-                lastText = ""
-                done()
-                toast("แปลไม่สำเร็จ: ต้องดาวน์โหลดโมเดลภาษาก่อน (ต่อเน็ตแล้วลองใหม่)")
+        val segments = text.split('\n').map { it.removePrefix("- ").trim() }.filter { it.isNotEmpty() }
+        val dialogue = segments.size > 1
+        val out = mutableListOf<String>()
+        fun fail() {
+            lastText = ""
+            done()
+            toast("แปลไม่สำเร็จ: ต้องดาวน์โหลดโมเดลภาษาก่อน (ต่อเน็ตแล้วลองใหม่)")
+        }
+        fun next(i: Int) {
+            if (i >= segments.size) {
+                val thai = if (dialogue) out.joinToString("\n") { "- $it" } else out.joinToString(" ")
+                onTranslated(text, thai, bounds)
+                return
             }
+            t.translate(segments[i])
+                .addOnSuccessListener { out.add(it.trim()); next(i + 1) }
+                .addOnFailureListener { fail() }
+        }
+        t.downloadModelIfNeeded(DownloadConditions.Builder().build())
+            .addOnSuccessListener { next(0) }
+            .addOnFailureListener { fail() }
     }
 
     private fun onTranslated(source: String, thai: String, bounds: Rect?) {
         cache.put(source, thai)
-        recentLines.addLast(source)
-        while (recentLines.size > 3) recentLines.removeFirst()
+        recentPairs.addLast(source to thai)
+        while (recentPairs.size > 4) recentPairs.removeFirst()
         showTranslation(thai, bounds)
         done()
         val app = applicationContext
@@ -607,6 +781,7 @@ class OverlayService : Service() {
         val t = box ?: return
         t.setStyle(prefs.textSizeSp, prefs.strokeDp)
         t.textColor = prefs.textColor
+        t.bgAlpha = prefs.bgAlpha
     }
 
     private fun resetBoxPosition() {
@@ -646,15 +821,35 @@ class OverlayService : Service() {
     private fun setBubbleColor() {
         val b = bubble ?: return
         val color = when {
+            paused -> COLOR_PAUSED
             busy && !auto -> COLOR_BUSY
             auto -> COLOR_AUTO
             else -> COLOR_IDLE
         }
-        b.text = if (auto) "ออโต้" else "แปล"
+        b.text = when {
+            paused -> "พัก"
+            auto -> "ออโต้"
+            else -> "แปล"
+        }
         b.background = GradientDrawable().apply {
             shape = GradientDrawable.OVAL
             setColor(color)
             setStroke(dp(2), Color.WHITE)
+        }
+    }
+
+    private fun togglePause() {
+        paused = !paused
+        if (paused) {
+            box?.visibility = View.GONE
+            toast("พักการแปลชั่วคราว")
+        } else {
+            lastSignature = null
+            toast("กลับมาแปลซับต่อ")
+        }
+        setBubbleColor()
+        runCatching {
+            getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification())
         }
     }
 
@@ -687,7 +882,9 @@ class OverlayService : Service() {
 
     private fun toggleAuto() {
         auto = !auto
+        paused = false
         main.removeCallbacks(autoTick)
+        pendingText = null
         if (auto) {
             lastText = ""
             lastSignature = null
@@ -697,6 +894,9 @@ class OverlayService : Service() {
             toast("ปิดแปลอัตโนมัติ")
         }
         setBubbleColor()
+        runCatching {
+            getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification())
+        }
     }
 
     // ---------------- Menu ----------------
@@ -726,6 +926,7 @@ class OverlayService : Service() {
             })
         }
         item(if (auto) "■  หยุดแปลอัตโนมัติ" else "▶  แปลอัตโนมัติ") { toggleAuto() }
+        if (auto) item(if (paused) "▶  ทำงานต่อ" else "⏸  พักชั่วคราว") { togglePause() }
         item("▢  เลือกบริเวณซับ") { openPicker() }
         item("☰  ประวัติคำแปล") { openActivity(HistoryActivity::class.java) }
         item("⚙  ตั้งค่า") { openActivity(MainActivity::class.java) }

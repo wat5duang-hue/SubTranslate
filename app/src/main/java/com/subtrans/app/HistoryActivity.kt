@@ -4,6 +4,7 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
@@ -20,12 +21,17 @@ import android.widget.TextView
 import android.widget.Toast
 import java.util.Date
 
-/** หน้าประวัติคำแปล: แตะรายการเพื่อคัดลอก */
+/** หน้าประวัติคำแปล: แตะรายการเพื่อคัดลอก และส่งออกเป็น .txt / .srt ได้ */
 class HistoryActivity : Activity() {
+
+    companion object {
+        private const val REQ_EXPORT = 101
+    }
 
     private var items: List<HistoryStore.Entry> = emptyList()
     private lateinit var adapter: BaseAdapter
     private lateinit var empty: TextView
+    private var exportAsSrt = false
 
     private fun dp(v: Int): Int =
         TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).toInt()
@@ -47,6 +53,11 @@ class HistoryActivity : Activity() {
             text = "แตะรายการเพื่อคัดลอก"
             setTextColor(0xFF666666.toInt())
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        bar.addView(Button(this).apply {
+            text = "ส่งออก"
+            isAllCaps = false
+            setOnClickListener { showExportDialog() }
+        })
         bar.addView(Button(this).apply {
             text = "ล้างทั้งหมด"
             isAllCaps = false
@@ -104,6 +115,44 @@ class HistoryActivity : Activity() {
         }
         root.addView(list, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         setContentView(root)
+    }
+
+    private fun showExportDialog() {
+        val raw = HistoryStore.load(this)
+        if (raw.isEmpty()) {
+            Toast.makeText(this, "ยังไม่มีประวัติให้ส่งออก", Toast.LENGTH_SHORT).show()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("เลือกรูปแบบไฟล์")
+            .setItems(arrayOf("ข้อความ (.txt)", "ไฟล์ซับไตเติล (.srt)")) { _, which ->
+                exportAsSrt = (which == 1)
+                val ext = if (exportAsSrt) "srt" else "txt"
+                val stamp = DateFormat.format("yyyyMMdd_HHmm", Date())
+                val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TITLE, "subtranslate_$stamp.$ext")
+                }
+                startActivityForResult(intent, REQ_EXPORT)
+            }
+            .show()
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQ_EXPORT || resultCode != RESULT_OK) return
+        val uri = data?.data ?: return
+        val entries = HistoryStore.load(this)
+        val content = if (exportAsSrt) HistoryStore.formatSrt(entries) else HistoryStore.formatTxt(entries)
+        runCatching {
+            contentResolver.openOutputStream(uri)?.bufferedWriter(Charsets.UTF_8)?.use { it.write(content) }
+        }.onSuccess {
+            Toast.makeText(this, "ส่งออกไฟล์สำเร็จ", Toast.LENGTH_SHORT).show()
+        }.onFailure {
+            Toast.makeText(this, "ส่งออกไม่สำเร็จ", Toast.LENGTH_SHORT).show()
+        }
     }
 
     override fun onResume() {

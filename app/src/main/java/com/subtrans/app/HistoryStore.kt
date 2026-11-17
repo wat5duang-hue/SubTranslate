@@ -60,4 +60,38 @@ object HistoryStore {
             tmp.renameTo(file(ctx))
         }
     }
+
+    /** แปลงประวัติเป็นข้อความ .txt */
+    fun formatTxt(entries: List<Entry>): String = buildString {
+        entries.forEach { e ->
+            val time = android.text.format.DateFormat.format("yyyy-MM-dd HH:mm:ss", e.time)
+            append("[$time]\n")
+            append(e.source).append('\n')
+            append(e.thai).append("\n\n")
+        }
+    }
+
+    /** แปลงประวัติเป็นไฟล์ซับ .srt (อิงเวลาบันทึกจริง) */
+    fun formatSrt(entries: List<Entry>): String {
+        if (entries.isEmpty()) return ""
+        val base = entries.first().time
+        return buildString {
+            entries.forEachIndexed { idx, e ->
+                val startMs = (e.time - base).coerceAtLeast(0L)
+                val nextMs = entries.getOrNull(idx + 1)?.let { it.time - base } ?: (startMs + 3000L)
+                val endMs = nextMs.coerceIn(startMs + 1000L, startMs + 5000L)
+                append(idx + 1).append('\n')
+                append(srtTime(startMs)).append(" --> ").append(srtTime(endMs)).append('\n')
+                append(e.thai).append("\n\n")
+            }
+        }
+    }
+
+    private fun srtTime(ms: Long): String {
+        val h = ms / 3_600_000
+        val m = (ms % 3_600_000) / 60_000
+        val s = (ms % 60_000) / 1000
+        val r = ms % 1000
+        return String.format("%02d:%02d:%02d,%03d", h, m, s, r)
+    }
 }

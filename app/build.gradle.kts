@@ -5,14 +5,14 @@ plugins {
 
 android {
     namespace = "com.subtrans.app"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.subtrans.app"
         minSdk = 26
-        targetSdk = 34
-        versionCode = 2
-        versionName = "2.0"
+        targetSdk = 35
+        versionCode = 4
+        versionName = "3.0"
     }
 
     buildTypes {
