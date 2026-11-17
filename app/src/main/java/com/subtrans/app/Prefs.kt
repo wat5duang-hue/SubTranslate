@@ -99,8 +99,8 @@ class Prefs(context: Context) {
 
     /** ความเร็วในการสแกนซับโหมดออโต้ (มิลลิวินาที) */
     var scanIntervalMs: Long
-        get() = sp.getInt(KEY_SCAN_INTERVAL, 450).coerceIn(250, 1500).toLong()
-        set(v) = sp.edit().putInt(KEY_SCAN_INTERVAL, v.toInt().coerceIn(250, 1500)).apply()
+        get() = sp.getInt(KEY_SCAN_INTERVAL, 250).coerceIn(150, 1500).toLong()
+        set(v) = sp.edit().putInt(KEY_SCAN_INTERVAL, v.toInt().coerceIn(150, 1500)).apply()
 
     /** ปรับความคมชัด/ขาวดำของภาพก่อนส่งเข้า ML Kit OCR */
     var ocrEnhance: Boolean

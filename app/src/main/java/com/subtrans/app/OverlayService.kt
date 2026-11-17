@@ -494,12 +494,18 @@ class OverlayService : Service() {
                 lastSignature = sig
             }
             if (grab != null && !unchanged && useVision) {
+                val bounds = Rect(grab.left, grab.top, grab.left + grab.bitmap.width, grab.top + grab.bitmap.height)
+                val scaled = if (grab.bitmap.width > 720) {
+                    val nh = (grab.bitmap.height * 720f / grab.bitmap.width).toInt().coerceAtLeast(16)
+                    Bitmap.createScaledBitmap(grab.bitmap, 720, nh, true).also { grab.bitmap.recycle() }
+                } else {
+                    grab.bitmap
+                }
                 val jpeg = ByteArrayOutputStream().use { bos ->
-                    grab.bitmap.compress(Bitmap.CompressFormat.JPEG, 82, bos)
+                    scaled.compress(Bitmap.CompressFormat.JPEG, 75, bos)
                     bos.toByteArray()
                 }
-                val bounds = Rect(grab.left, grab.top, grab.left + grab.bitmap.width, grab.top + grab.bitmap.height)
-                grab.bitmap.recycle()
+                scaled.recycle()
                 main.post { translateWithVision(jpeg, bounds, fromAuto) }
                 return@post
             }
@@ -626,16 +632,9 @@ class OverlayService : Service() {
             done()
             return
         }
-        // ซับใหม่: รอให้อ่านได้ตรงกัน 2 ครั้งติดก่อน กันแปลซับที่กำลังเปลี่ยน/จาง แล้วได้คำผิด
-        val p = pendingText
-        if (p != null && Lang.similarity(text, p) >= STABLE_SIMILARITY) {
-            pendingText = null
-            translateConfirmed(if (text.length >= p.length) text else p, bounds)
-        } else {
-            pendingText = text
-            pendingBounds = bounds
-            done()
-        }
+        // แปลทันทีที่อ่านได้ชัดเจน ลดความหน่วงไม่ต้องรอเฟรมถัดไป
+        pendingText = null
+        translateConfirmed(text, bounds)
     }
 
     private fun translateConfirmed(text: String, bounds: Rect?) {
@@ -649,6 +648,8 @@ class OverlayService : Service() {
 
         val g = gemini
         if (g != null) {
+            // แสดงคำแปลออฟไลน์ทันทีเป็นตัวอย่างระหว่างรอ AI ตอบกลับ
+            translateOfflinePreview(text, bounds)
             g.translate(text, lang, recentPairs.toList(), prefs.aiStyle()) { r ->
                 r.onSuccess { onTranslated(text, it, bounds) }
                     .onFailure { e ->
@@ -668,6 +669,25 @@ class OverlayService : Service() {
         } else {
             translateOffline(text, bounds)
         }
+    }
+
+    /** แปลออฟไลน์แบบเร็วเพื่อแสดงชั่วคราวระหว่างรอ AI (ไม่บันทึกลงแคช/ประวัติ) */
+    private fun translateOfflinePreview(text: String, bounds: Rect?) {
+        val t = mlTranslator ?: return
+        val segments = text.split('\n').map { it.removePrefix("- ").trim() }.filter { it.isNotEmpty() }
+        if (segments.isEmpty()) return
+        val dialogue = segments.size > 1
+        val out = mutableListOf<String>()
+        fun next(i: Int) {
+            if (lastText != text) return
+            if (i >= segments.size) {
+                val thai = if (dialogue) out.joinToString("\n") { "- $it" } else out.joinToString(" ")
+                if (thai.isNotBlank() && lastText == text) showTranslation(thai, bounds)
+                return
+            }
+            t.translate(segments[i]).addOnSuccessListener { out.add(it.trim()); next(i + 1) }
+        }
+        next(0)
     }
 
     /** แปลออฟไลน์ทีละบรรทัด (บทสนทนาหลายคนแปลแยกกัน ได้ผลดีกว่าแปลรวด) */

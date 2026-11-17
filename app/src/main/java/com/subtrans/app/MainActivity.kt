@@ -439,7 +439,7 @@ class MainActivity : ComponentActivity() {
         slider(
             pAdv,
             { "ความเร็วสแกนโหมดออโต้: ${it}ms (ค่าน้อย = ตอบสนองไว)" },
-            250, 1500, prefs.scanIntervalMs.toInt()
+            150, 1500, prefs.scanIntervalMs.toInt()
         ) {
             prefs.scanIntervalMs = it.toLong()
         }

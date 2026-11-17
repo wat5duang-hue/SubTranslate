@@ -276,6 +276,26 @@ class GeminiTranslator(private val apiKey: String, private val model: String) {
         }
     }
 
+    private fun fastGenerationConfig(
+        temperature: Double,
+        maxOutputTokens: Int,
+        jsonMode: Boolean = false
+    ): JSONObject {
+        val cfg = JSONObject()
+            .put("temperature", temperature)
+            .put("maxOutputTokens", maxOutputTokens)
+        if (jsonMode) cfg.put("responseMimeType", "application/json")
+        val thinkingLevel = when {
+            model.startsWith("gemini-3.5") || model.startsWith("gemini-3.6") || model.startsWith("gemini-3-flash") -> "MINIMAL"
+            model.startsWith("gemini-3.8") || model.startsWith("gemini-4") -> "LOW"
+            else -> null
+        }
+        if (thinkingLevel != null) {
+            cfg.put("thinkingConfig", JSONObject().put("thinkingLevel", thinkingLevel))
+        }
+        return cfg
+    }
+
     private fun requestText(
         text: String,
         sourceLang: String,
@@ -307,7 +327,7 @@ class GeminiTranslator(private val apiKey: String, private val model: String) {
                         .put("parts", JSONArray().put(JSONObject().put("text", prompt)))
                 )
             )
-            .put("generationConfig", JSONObject().put("temperature", 0.3).put("maxOutputTokens", 512))
+            .put("generationConfig", fastGenerationConfig(0.3, 512))
 
         return callApi(body)
     }
@@ -344,13 +364,7 @@ class GeminiTranslator(private val apiKey: String, private val model: String) {
         val body = JSONObject()
             .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))))
             .put("contents", JSONArray().put(JSONObject().put("role", "user").put("parts", parts)))
-            .put(
-                "generationConfig",
-                JSONObject()
-                    .put("temperature", 0.2)
-                    .put("maxOutputTokens", 512)
-                    .put("responseMimeType", "application/json")
-            )
+            .put("generationConfig", fastGenerationConfig(0.2, 512, jsonMode = true))
 
         val raw = callApi(body)
         if (raw.equals("NONE", ignoreCase = true)) return "" to ""
